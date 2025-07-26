@@ -1,0 +1,5 @@
+{
+  "serviceName": "my-service",
+  "workersDomain": "my-domain.workers.dev",
+  "accountId": "your-cloudflare-account-id"
+}

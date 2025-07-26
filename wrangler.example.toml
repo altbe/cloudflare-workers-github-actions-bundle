@@ -1,0 +1,39 @@
+# Example wrangler configuration
+# Copy this file and create environment-specific versions:
+# - wrangler.dev.toml
+# - wrangler.qa.toml  
+# - wrangler.prod.toml
+
+name = "your-service-ENVIRONMENT"
+main = "dist/index.js"
+compatibility_date = "2025-01-01"
+
+# Optional: Custom domains
+# routes = [
+#   { pattern = "app.yourdomain.com/*", custom_domain = true }
+# ]
+
+# Optional: Environment variables
+# [vars]
+# ENVIRONMENT = "dev"
+# API_URL = "https://api.example.com"
+
+# Optional: KV namespaces
+# kv_namespaces = [
+#   { binding = "MY_KV", id = "your-kv-namespace-id" }
+# ]
+
+# Optional: R2 buckets
+# r2_buckets = [
+#   { binding = "MY_BUCKET", bucket_name = "your-bucket-name" }
+# ]
+
+# Optional: Durable Objects
+# [durable_objects]
+# bindings = [
+#   { name = "MY_DO", class_name = "MyDurableObject" }
+# ]
+
+# Optional: Worker limits
+# [limits]
+# cpu_ms = 100

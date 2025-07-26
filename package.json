@@ -1,0 +1,13 @@
+{
+  "name": "cloudflare-workers-github-actions-bundle",
+  "version": "1.0.0",
+  "description": "Simple, reusable GitHub Actions workflows for Cloudflare Workers deployment",
+  "type": "module",
+  "keywords": [
+    "cloudflare",
+    "workers",
+    "github-actions",
+    "deployment",
+    "ci-cd"
+  ]
+}

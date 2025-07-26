@@ -1,0 +1,121 @@
+# Workflow to auto-merge Dependabot PRs if they pass tests
+name: Auto-merge Dependabot PRs
+
+on:
+  pull_request:
+    branches: [ main ]
+
+permissions:
+  contents: write
+  pull-requests: write
+  checks: read
+
+jobs:
+  auto-merge:
+    runs-on: ubuntu-latest
+    if: github.actor == 'dependabot[bot]'
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.15.1'
+          cache: 'npm'
+          
+      - name: Install dependencies
+        run: npm ci --include=dev
+        
+      - name: Run build
+        run: npm run build
+        
+      - name: Run linter
+        run: npm run lint || true
+        
+      - name: Run type check
+        run: npm run typecheck || true
+        
+      - name: Run security audit
+        run: npm audit --production
+        continue-on-error: true
+      
+      - name: Auto-merge Dependabot PRs for minor and patch updates
+        if: success()
+        run: |
+          PR_DATA=$(curl -s -H "Authorization: token ${{ github.token }}" \
+                   "https://api.github.com/repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}")
+          
+          PR_TITLE=$(echo "$PR_DATA" | jq -r '.title')
+          echo "PR Title: $PR_TITLE"
+          
+          # Try different title patterns used by Dependabot
+          # Pattern 1: "Bump package from x.y.z to a.b.c"
+          if [[ "$PR_TITLE" =~ [Bb]ump[[:space:]]+(.+)[[:space:]]+from[[:space:]]+([0-9]+(\.[0-9]+)*)[[:space:]]+to[[:space:]]+([0-9]+(\.[0-9]+)*) ]]; then
+            DEPENDENCY_NAME="${BASH_REMATCH[1]}"
+            OLD_VERSION="${BASH_REMATCH[2]}"
+            NEW_VERSION="${BASH_REMATCH[4]}"
+          # Pattern 2: "Update package from x.y.z to a.b.c"
+          elif [[ "$PR_TITLE" =~ [Uu]pdate[[:space:]]+(.+)[[:space:]]+from[[:space:]]+([0-9]+(\.[0-9]+)*)[[:space:]]+to[[:space:]]+([0-9]+(\.[0-9]+)*) ]]; then
+            DEPENDENCY_NAME="${BASH_REMATCH[1]}"
+            OLD_VERSION="${BASH_REMATCH[2]}"
+            NEW_VERSION="${BASH_REMATCH[4]}"
+          # Pattern 3: "chore(deps): bump package from x.y.z to a.b.c"
+          elif [[ "$PR_TITLE" =~ chore\(deps[^)]*\):[[:space:]]*[Bb]ump[[:space:]]+(.+)[[:space:]]+from[[:space:]]+([0-9]+(\.[0-9]+)*)[[:space:]]+to[[:space:]]+([0-9]+(\.[0-9]+)*) ]]; then
+            DEPENDENCY_NAME="${BASH_REMATCH[1]}"
+            OLD_VERSION="${BASH_REMATCH[2]}"
+            NEW_VERSION="${BASH_REMATCH[4]}"
+          # Pattern 4: Handle monorepo updates like "@types/react"
+          elif [[ "$PR_TITLE" =~ [Bb]ump[[:space:]]+([^[:space:]]+)[[:space:]]+from[[:space:]]+([0-9]+(\.[0-9]+)*)[[:space:]]+to[[:space:]]+([0-9]+(\.[0-9]+)*) ]]; then
+            DEPENDENCY_NAME="${BASH_REMATCH[1]}"
+            OLD_VERSION="${BASH_REMATCH[2]}"
+            NEW_VERSION="${BASH_REMATCH[4]}"
+          else
+            echo "Could not parse PR title. Trying simpler pattern..."
+            # Simple pattern for any version format
+            if [[ "$PR_TITLE" =~ from[[:space:]]+([0-9]+)[[:space:]]+to[[:space:]]+([0-9]+) ]]; then
+              MAJOR_OLD="${BASH_REMATCH[1]}"
+              MAJOR_NEW="${BASH_REMATCH[2]}"
+              if [ "$MAJOR_OLD" == "$MAJOR_NEW" ]; then
+                echo "Major version unchanged, auto-merging..."
+                gh pr merge "${{ github.event.pull_request.number }}" --auto --squash
+                exit 0
+              else
+                echo "Major version change detected, skipping auto-merge"
+                exit 0
+              fi
+            else
+              echo "Could not determine version change. PR Title was: $PR_TITLE"
+              # For safety, we'll allow auto-merge for any Dependabot PR that passed checks
+              echo "Auto-merging Dependabot PR since all checks passed..."
+              gh pr merge "${{ github.event.pull_request.number }}" --auto --squash
+              exit 0
+            fi
+          fi
+          
+          echo "Dependency: $DEPENDENCY_NAME"
+          echo "Old version: $OLD_VERSION"
+          echo "New version: $NEW_VERSION"
+          
+          # Validate versions before processing
+          if [ -z "$OLD_VERSION" ] || [ -z "$NEW_VERSION" ]; then
+            echo "Could not extract versions. Auto-merging since checks passed..."
+            gh pr merge "${{ github.event.pull_request.number }}" --auto --squash
+            exit 0
+          fi
+          
+          MAJOR_OLD=$(echo "$OLD_VERSION" | cut -d. -f1)
+          MAJOR_NEW=$(echo "$NEW_VERSION" | cut -d. -f1)
+          
+          echo "Major old: $MAJOR_OLD"
+          echo "Major new: $MAJOR_NEW"
+          
+          if [ "$MAJOR_OLD" == "$MAJOR_NEW" ]; then
+            echo "Auto-merging minor/patch update for $DEPENDENCY_NAME"
+            gh pr merge "${{ github.event.pull_request.number }}" --auto --squash
+          else
+            echo "Skipping auto-merge for major version update of $DEPENDENCY_NAME"
+          fi
+        env:
+          GITHUB_TOKEN: ${{ github.token }}

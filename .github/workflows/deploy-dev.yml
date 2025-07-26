@@ -1,0 +1,35 @@
+# deploy-dev.yml - Development-specific deployment workflow
+name: Deploy to Development
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+      - 'doc/**'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to deploy (optional)'
+        required: false
+        default: ''
+
+jobs:
+  deploy:
+    uses: ./.github/workflows/deploy.yml
+    with:
+      environment: dev
+      service_name: my-service
+      repository: ${{ github.repository }}
+      # Optional: override these if defaults don't work for your project
+      # wrangler_config: wrangler.dev.toml
+      # build_command: npm run build:dev
+      node_version: '22.15.1'
+      workers_domain: 'my-domain.workers.dev'
+      deployment_url_pattern: 'https://{service_name}-{environment}.{domain}'
+      run_security_scan: true
+    secrets:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}

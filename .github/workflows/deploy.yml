@@ -1,0 +1,338 @@
+# deploy.yml - Reusable deployment workflow for multiple environments
+name: Deploy to Environment
+
+# Define workflow inputs when called from other workflows
+on:
+  workflow_call:
+    inputs:
+      environment:
+        required: true
+        type: string
+        description: 'Target environment (dev, qa, prod)'
+      service_name:
+        required: true
+        type: string
+        description: 'Service name (e.g., my-service, my-api)'
+      repository:
+        required: false
+        type: string
+        description: 'Repository name. Defaults to current repository'
+        default: ''
+      wrangler_config:
+        required: false
+        type: string
+        description: 'Wrangler config file to use. Defaults to wrangler.[environment].toml'
+        default: ''
+      build_command:
+        required: false
+        type: string
+        description: 'Build command to run. Defaults to npm run build:[environment]'
+        default: ''
+      node_version:
+        required: false
+        type: string
+        default: '22.15.1'
+        description: 'Node.js version to use'
+      workers_domain:
+        required: false
+        type: string
+        default: 'my-domain.workers.dev'
+        description: 'The workers.dev domain to use'
+      deployment_url_pattern:
+        required: false
+        type: string
+        default: 'https://{service_name}-{environment}.{domain}'
+        description: 'URL pattern for the deployment (use {service_name}, {environment}, and {domain} as placeholders)'
+      run_security_scan:
+        required: false
+        type: boolean
+        default: true
+        description: 'Whether to run security scans'
+    secrets:
+      CLOUDFLARE_API_TOKEN:
+        required: true
+      CLOUDFLARE_ACCOUNT_ID:
+        required: true
+
+jobs:
+  determine-environment:
+    runs-on: ubuntu-latest
+    outputs:
+      environment: ${{ steps.set-env.outputs.environment }}
+      service_name: ${{ steps.set-env.outputs.service_name }}
+      repository: ${{ steps.set-env.outputs.repository }}
+      wrangler_config: ${{ steps.set-env.outputs.wrangler_config }}
+      build_command: ${{ steps.set-env.outputs.build_command }}
+      deployment_url: ${{ steps.set-env.outputs.deployment_url }}
+    steps:
+      - id: set-env
+        run: |
+          # Set repository name - use input or current repo
+          REPO="${{ inputs.repository }}"
+          if [[ -z "$REPO" ]]; then
+            REPO="${{ github.repository }}"
+          fi
+          echo "repository=$REPO" >> $GITHUB_OUTPUT
+          
+          # If called via workflow_call, use the inputs
+          if [[ "${{ inputs.environment }}" != "" ]]; then
+            ENV="${{ inputs.environment }}"
+            SERVICE="${{ inputs.service_name }}"
+            
+            echo "environment=$ENV" >> $GITHUB_OUTPUT
+            echo "service_name=$SERVICE" >> $GITHUB_OUTPUT
+            
+            # Set wrangler config - use input or default
+            WRANGLER_CONFIG="${{ inputs.wrangler_config }}"
+            if [[ -z "$WRANGLER_CONFIG" ]]; then
+              WRANGLER_CONFIG="wrangler.$ENV.toml"
+            fi
+            echo "wrangler_config=$WRANGLER_CONFIG" >> $GITHUB_OUTPUT
+            
+            # Set build command - use input or default
+            BUILD_CMD="${{ inputs.build_command }}"
+            if [[ -z "$BUILD_CMD" ]]; then
+              BUILD_CMD="npm run build:$ENV"
+            fi
+            echo "build_command=$BUILD_CMD" >> $GITHUB_OUTPUT
+            
+            # Build deployment URL from pattern
+            URL_PATTERN="${{ inputs.deployment_url_pattern }}"
+            URL_PATTERN="${URL_PATTERN//\{service_name\}/$SERVICE}"
+            URL_PATTERN="${URL_PATTERN//\{environment\}/$ENV}"
+            URL_PATTERN="${URL_PATTERN//\{domain\}/${{ inputs.workers_domain }}}"
+            echo "deployment_url=$URL_PATTERN" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          # This section is now dead code since the workflow is only triggered via workflow_call
+          # But keeping it for backward compatibility or if direct trigger is re-enabled
+          TAG="${{ github.ref_name }}"
+          WORKERS_DOMAIN="${{ inputs.workers_domain || 'my-domain.workers.dev' }}"
+          
+          # Determine environment from tag (legacy code path)
+          if [[ "$TAG" == qa-* ]]; then
+            ENV="qa"
+          elif [[ "$TAG" == prod-* ]]; then
+            ENV="prod"
+          else
+            # Default to dev for branches or any other unmatched patterns
+            ENV="dev"
+          fi
+          echo "environment=$ENV" >> $GITHUB_OUTPUT
+          
+          # Use the service_name parameter directly
+          SERVICE="${{ inputs.service_name }}"
+          echo "service_name=$SERVICE" >> $GITHUB_OUTPUT
+          
+          # Set wrangler config based on environment
+          echo "wrangler_config=wrangler.$ENV.toml" >> $GITHUB_OUTPUT
+          
+          # Set build command based on environment
+          echo "build_command=npm run build:$ENV" >> $GITHUB_OUTPUT
+          
+          # Set deployment URL
+          echo "deployment_url=https://$SERVICE-$ENV.$WORKERS_DOMAIN" >> $GITHUB_OUTPUT
+
+  security-scan:
+    needs: determine-environment
+    if: inputs.run_security_scan == true || inputs.run_security_scan == ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ needs.determine-environment.outputs.repository }}
+          
+      # Basic security scanning without GitHub Advanced Security
+      - name: Run npm audit
+        run: |
+          echo "Running npm security audit..."
+          npm audit --production --json > npm-audit-results.json || echo "Vulnerabilities found, but continuing..."
+          echo "Security scan complete. Review results in job artifacts."
+          
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version || '22.15.1' }}
+            
+      - name: Build with checks
+        run: |
+          npm ci --include=dev
+          ${{ needs.determine-environment.outputs.build_command }}
+          
+      - name: Upload audit results as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-audit-results
+          path: npm-audit-results.json
+          retention-days: 30
+          
+  deploy:
+    needs: [determine-environment, security-scan]
+    if: always() && (needs.security-scan.result == 'success' || needs.security-scan.result == 'skipped')
+    runs-on: ubuntu-latest
+    environment: ${{ needs.determine-environment.outputs.environment }}
+    permissions:
+      contents: read
+      deployments: write
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ needs.determine-environment.outputs.repository }}
+          ref: ${{ github.ref }}
+          fetch-depth: 0
+          
+      - name: Verify repository integrity
+        run: |
+          git verify-tag ${{ github.ref_name }} || echo "Warning: Tag is not signed or verification failed"
+          git verify-commit ${{ github.sha }} || echo "Warning: Commit is not signed or verification failed"
+          
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version || '22.15.1' }}
+          cache: 'npm'
+          
+      - name: Install dependencies
+        run: npm ci --include=dev
+        
+      # Generate basic SBOM with npm ls after installing dependencies
+      - name: Generate SBOM
+        run: |
+          echo "Generating Software Bill of Materials..."
+          npm ls --all --json > sbom.json || echo "Some dependencies might be missing, but continuing..."
+        
+      - name: Build application
+        run: ${{ needs.determine-environment.outputs.build_command }}
+        # Environment variables are defined in the wrangler config files
+        # Add any additional build-time environment variables here if needed
+          
+      - name: Verify build output
+        run: |
+          if [ ! -d "dist" ]; then
+            echo "Error: Build failed - dist directory not found"
+            exit 1
+          fi
+          
+      # Diagnostic step to check if secrets are available
+      - name: Check secret availability
+        run: |
+          echo "Checking Cloudflare API token availability..."
+          if [ -n "$CLOUDFLARE_API_TOKEN" ]; then
+            echo "✅ CLOUDFLARE_API_TOKEN is set and not empty"
+          else
+            echo "❌ CLOUDFLARE_API_TOKEN is either not set or empty"
+          fi
+          
+          if [ -n "$CLOUDFLARE_ACCOUNT_ID" ]; then
+            echo "✅ CLOUDFLARE_ACCOUNT_ID is set and not empty"
+          else
+            echo "❌ CLOUDFLARE_ACCOUNT_ID is either not set or empty"
+          fi
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      
+      # Alternative deployment with manual wrangler.toml setup
+      - name: Deploy to Cloudflare Workers
+        run: |
+          echo "Setting up Wrangler configuration..."
+          
+          # Create a wrangler config file if it doesn't exist
+          if [ ! -f "$WRANGLER_CONFIG" ]; then
+            echo "Warning: Wrangler config file not found, creating a minimal one"
+            printf 'name = "%s-%s"\nmain = "dist/index.js"\ncompatibility_date = "2025-05-05"\n' "$SERVICE_NAME" "$ENVIRONMENT" > "$WRANGLER_CONFIG"
+          fi
+          
+          # Create a .env file with the credentials
+          echo "CLOUDFLARE_API_TOKEN=$CLOUDFLARE_API_TOKEN" > .env
+          echo "CLOUDFLARE_ACCOUNT_ID=$CLOUDFLARE_ACCOUNT_ID" >> .env
+          
+          echo "Deploying with Wrangler CLI..."
+          # Deploy using environment-specific config file directly (no --env flag needed)
+          npx wrangler deploy --config "$WRANGLER_CONFIG"
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          WRANGLER_CONFIG: ${{ needs.determine-environment.outputs.wrangler_config }}
+          SERVICE_NAME: ${{ needs.determine-environment.outputs.service_name }}
+          ENVIRONMENT: ${{ needs.determine-environment.outputs.environment }}
+          
+      - name: Create deployment record
+        uses: actions/github-script@v7
+        if: always()
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const environment = '${{ needs.determine-environment.outputs.environment }}';
+            const deploymentUrl = '${{ needs.determine-environment.outputs.deployment_url }}';
+            
+            try {
+              const deploymentResult = await github.rest.repos.createDeployment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                ref: context.ref.replace('refs/tags/', ''),
+                environment: environment,
+                auto_merge: false,
+                required_contexts: [],
+                environment_url: deploymentUrl
+              });
+              
+              await github.rest.repos.createDeploymentStatus({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                deployment_id: deploymentResult.data.id,
+                state: 'success',
+                environment_url: deploymentUrl,
+                description: `Deployed tag ${context.ref.replace('refs/tags/', '')}`
+              });
+              
+              console.log('Deployment record created and marked as successful');
+            } catch (error) {
+              console.log(`Warning: ${error.message}`);
+            }
+          
+      - name: Upload SBOM as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-${{ needs.determine-environment.outputs.environment }}
+          path: sbom.json
+          retention-days: 30
+          
+      - name: Notify deployment
+        run: |
+          echo "✅ Deployed to ${{ needs.determine-environment.outputs.environment }} environment"
+          echo "🔗 URL: ${{ needs.determine-environment.outputs.deployment_url }}"
+          echo "🏷️ Tag: ${{ github.ref_name }}"
+          echo "📝 Commit: ${{ github.sha }}"
+
+  post-deploy-scan:
+    needs: [determine-environment, deploy]
+    if: needs.determine-environment.outputs.environment != 'prod' && (inputs.run_security_scan == true || inputs.run_security_scan == '')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Basic site health check
+        run: |
+          echo "Performing basic health check on deployed site..."
+          URL="${{ needs.determine-environment.outputs.deployment_url }}"
+          
+          # Simple HTTP check
+          HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$URL")
+          echo "HTTP Status: $HTTP_STATUS"
+          
+          if [[ "$HTTP_STATUS" -ge 200 && "$HTTP_STATUS" -lt 400 ]]; then
+            echo "✅ Site is responding with a successful status code"
+          else
+            echo "⚠️ Warning: Site returned status code $HTTP_STATUS"
+          fi
+          
+          # You could add more basic checks here
+          
+          echo "Health check complete"

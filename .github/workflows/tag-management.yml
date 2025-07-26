@@ -1,0 +1,61 @@
+name: Tag Management Helper
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment'
+        required: true
+        type: choice
+        options:
+          - qa
+          - prod
+      version:
+        description: 'Version tag (e.g., 1.2.3)'
+        required: true
+        type: string
+      commit:
+        description: 'Commit SHA to tag (leave empty for HEAD)'
+        required: false
+        type: string
+
+jobs:
+  create-tag:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          
+      - name: Configure Git
+        run: |
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+          
+      - name: Create and push tag
+        run: |
+          # Determine commit to tag
+          COMMIT_SHA="${{ github.event.inputs.commit }}"
+          if [ -z "$COMMIT_SHA" ]; then
+            COMMIT_SHA="HEAD"
+          fi
+          
+          # Create tag based on environment
+          TAG_NAME="${{ github.event.inputs.environment }}-${{ github.event.inputs.version }}"
+          
+          # Create the tag
+          git tag -a "$TAG_NAME" "$COMMIT_SHA" -m "Deploy to ${{ github.event.inputs.environment }} - version ${{ github.event.inputs.version }}"
+          
+          # Push the tag
+          git push origin "$TAG_NAME"
+          
+          echo "✅ Created tag: $TAG_NAME"
+          echo "📝 Tagged commit: $(git rev-parse $COMMIT_SHA)"
+          
+      - name: Trigger deployment notification
+        run: |
+          echo "🚀 Tag created. Deployment workflow will be triggered automatically."
+          echo "📍 Environment: ${{ github.event.inputs.environment }}"
+          echo "🏷️ Version: ${{ github.event.inputs.version }}"

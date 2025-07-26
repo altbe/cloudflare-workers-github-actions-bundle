@@ -1,0 +1,22 @@
+{
+  "name": "my-service",
+  "version": "1.0.0",
+  "description": "My Cloudflare Worker service",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "build": "echo 'Add your build command here'",
+    "build:dev": "npm run build",
+    "build:qa": "npm run build",
+    "build:prod": "npm run build",
+    "deploy:dev": "wrangler deploy --config wrangler.dev.toml",
+    "deploy:qa": "wrangler deploy --config wrangler.qa.toml",
+    "deploy:prod": "wrangler deploy --config wrangler.prod.toml",
+    "init": "node scripts/init-environment.js",
+    "tag:create": "node scripts/create-tag.js",
+    "tag:status": "node scripts/deployment-status.js"
+  },
+  "devDependencies": {
+    "wrangler": "^3.84.0"
+  }
+}
