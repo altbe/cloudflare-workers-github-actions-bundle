@@ -152,21 +152,34 @@ async function checkCloudflare() {
 async function checkEnvironmentFiles() {
   console.log('📄 Checking environment files...\n');
   
-  const requiredFiles = [
+  const wranglerFiles = [
     'wrangler.dev.toml',
     'wrangler.qa.toml', 
-    'wrangler.prod.toml',
-    'package.json'
+    'wrangler.prod.toml'
   ];
   
-  let allExist = true;
+  const criticalFiles = ['package.json'];
   
-  for (const file of requiredFiles) {
+  let criticalMissing = false;
+  let wranglerMissing = false;
+  
+  // Check wrangler files (can be auto-created)
+  for (const file of wranglerFiles) {
     if (fs.existsSync(file)) {
       console.log(`✅ ${file} exists`);
     } else {
       console.log(`❌ ${file} not found`);
-      allExist = false;
+      wranglerMissing = true;
+    }
+  }
+  
+  // Check critical files (must exist)
+  for (const file of criticalFiles) {
+    if (fs.existsSync(file)) {
+      console.log(`✅ ${file} exists`);
+    } else {
+      console.log(`❌ ${file} not found`);
+      criticalMissing = true;
     }
   }
   
@@ -179,7 +192,7 @@ async function checkEnvironmentFiles() {
   }
   
   console.log();
-  return allExist;
+  return { criticalMissing, wranglerMissing };
 }
 
 async function checkWorkers() {
@@ -204,13 +217,6 @@ async function checkWorkers() {
     // Use defaults
   }
   
-  const workersList = exec('wrangler list', { silent: true });
-  if (!workersList) {
-    console.log('❌ Cannot list Cloudflare Workers');
-    console.log('   💡 Check your Cloudflare authentication');
-    return false;
-  }
-  
   const expectedWorkers = [
     `${serviceName}-dev`,
     `${serviceName}-qa`, 
@@ -218,13 +224,39 @@ async function checkWorkers() {
   ];
   
   let workersExist = 0;
+  
+  // Check if account ID is available
+  const hasEnvAccountId = process.env.CLOUDFLARE_ACCOUNT_ID;
+  const hasConfigAccountId = accountId && accountId !== 'YOUR_ACCOUNT_ID';
+  
+  if (!hasEnvAccountId && !hasConfigAccountId) {
+    console.log('❌ CLOUDFLARE_ACCOUNT_ID environment variable not set and no accountId in worker-config.json');
+    console.log('   💡 Set CLOUDFLARE_ACCOUNT_ID environment variable or configure accountId in worker-config.json');
+    return false;
+  }
+  
+  // Check if workers exist by trying to get their deployments
+  // Set account ID via environment variable since --account-id is not supported
+  const originalAccountId = process.env.CLOUDFLARE_ACCOUNT_ID;
+  if (hasConfigAccountId && !hasEnvAccountId) {
+    process.env.CLOUDFLARE_ACCOUNT_ID = accountId;
+  }
+  
   for (const workerName of expectedWorkers) {
-    if (workersList.includes(workerName)) {
+    const deployments = exec(`wrangler deployments list --name ${workerName}`, { silent: true });
+    if (deployments && !deployments.includes('error') && !deployments.includes('not found') && !deployments.includes('No deployments found') && !deployments.includes('Unknown arguments')) {
       console.log(`✅ Worker exists: ${workerName}`);
       workersExist++;
     } else {
       console.log(`❌ Worker not found: ${workerName}`);
     }
+  }
+  
+  // Restore original account ID
+  if (originalAccountId) {
+    process.env.CLOUDFLARE_ACCOUNT_ID = originalAccountId;
+  } else if (hasConfigAccountId && !hasEnvAccountId) {
+    delete process.env.CLOUDFLARE_ACCOUNT_ID;
   }
   
   if (workersExist === 0) {
@@ -254,6 +286,12 @@ async function checkWorkers() {
 async function provisionWorkers(serviceName, accountId, expectedWorkers) {
   console.log('\n🏗️  Provisioning Cloudflare Workers...');
   
+  // Set account ID via environment variable since --account-id is not supported
+  const originalAccountId = process.env.CLOUDFLARE_ACCOUNT_ID;
+  if (accountId && accountId !== 'YOUR_ACCOUNT_ID') {
+    process.env.CLOUDFLARE_ACCOUNT_ID = accountId;
+  }
+  
   const environments = [
     { name: 'dev', message: 'Hello dev!' },
     { name: 'qa', message: 'Hello qa!' },
@@ -273,8 +311,8 @@ async function provisionWorkers(serviceName, accountId, expectedWorkers) {
       // Write temp file
       fs.writeFileSync(tempFile, workerCode);
       
-      // Deploy worker
-      exec(`wrangler deploy ${tempFile} --name ${workerName} --account-id ${accountId} --compatibility-date 2025-01-01`);
+      // Deploy worker (removed --account-id parameter)
+      exec(`wrangler deploy ${tempFile} --name ${workerName} --compatibility-date 2025-01-01`);
       console.log(`✅ Created: ${workerName}`);
       
     } catch (error) {
@@ -287,6 +325,13 @@ async function provisionWorkers(serviceName, accountId, expectedWorkers) {
         // Ignore cleanup errors
       }
     }
+  }
+  
+  // Restore original account ID
+  if (originalAccountId) {
+    process.env.CLOUDFLARE_ACCOUNT_ID = originalAccountId;
+  } else if (accountId && accountId !== 'YOUR_ACCOUNT_ID') {
+    delete process.env.CLOUDFLARE_ACCOUNT_ID;
   }
   
   console.log('\n🎉 Worker provisioning complete!');
@@ -458,8 +503,8 @@ async function main() {
       process.exit(1);
     }
     
-    const envFilesOk = await checkEnvironmentFiles();
-    if (!envFilesOk) {
+    const { criticalMissing, wranglerMissing } = await checkEnvironmentFiles();
+    if (criticalMissing) {
       console.log('\n⚠️  Required files are missing. Please create them before continuing.');
       process.exit(1);
     }
@@ -474,29 +519,41 @@ async function main() {
       console.log('\n⚠️  Required package.json scripts are missing. Please add them before continuing.');
     }
     
-    // Offer to create/update files if config exists
+    // Offer to create wrangler configs if missing
+    if (wranglerMissing) {
+      let serviceName = 'my-service';
+      
+      // Try to get service name from config or package.json
+      if (fs.existsSync('worker-config.json')) {
+        try {
+          const config = JSON.parse(fs.readFileSync('worker-config.json', 'utf8'));
+          serviceName = config.serviceName || serviceName;
+        } catch (error) {
+          // Use default
+        }
+      } else if (fs.existsSync('package.json')) {
+        try {
+          const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+          serviceName = pkg.name || serviceName;
+        } catch (error) {
+          // Use default
+        }
+      }
+      
+      const answer = await question('\nWould you like to create missing wrangler configuration files? (y/n): ');
+      if (answer.toLowerCase() === 'y') {
+        await createWranglerConfigs(serviceName);
+      }
+    }
+    
+    // Offer to update workflow files if config exists
     if (fs.existsSync('worker-config.json')) {
       try {
         const config = JSON.parse(fs.readFileSync('worker-config.json', 'utf8'));
-        if (config.serviceName) {
-          // Offer to create wrangler configs
-          const needsWranglerConfigs = !fs.existsSync('wrangler.dev.toml') || 
-                                     !fs.existsSync('wrangler.qa.toml') || 
-                                     !fs.existsSync('wrangler.prod.toml');
-          
-          if (needsWranglerConfigs) {
-            const answer = await question('\nWould you like to create missing wrangler configuration files? (y/n): ');
-            if (answer.toLowerCase() === 'y') {
-              await createWranglerConfigs(config.serviceName);
-            }
-          }
-          
-          // Offer to update workflow files
-          if (config.workersDomain) {
-            const answer = await question('\nWould you like to update GitHub Actions workflow files with your configuration? (y/n): ');
-            if (answer.toLowerCase() === 'y') {
-              await updateWorkflowFiles(config.serviceName, config.workersDomain);
-            }
+        if (config.serviceName && config.workersDomain) {
+          const answer = await question('\nWould you like to update GitHub Actions workflow files with your configuration? (y/n): ');
+          if (answer.toLowerCase() === 'y') {
+            await updateWorkflowFiles(config.serviceName, config.workersDomain);
           }
         }
       } catch (error) {
