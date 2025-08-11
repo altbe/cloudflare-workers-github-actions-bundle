@@ -17,6 +17,6 @@
     "tag:status": "node scripts/deployment-status.js"
   },
   "devDependencies": {
-    "wrangler": "^3.84.0"
+    "wrangler": "^4.28.1"
   }
 }
