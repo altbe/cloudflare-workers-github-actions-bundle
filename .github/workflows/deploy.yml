@@ -154,7 +154,7 @@ jobs:
           echo "Security scan complete. Review results in job artifacts."
           
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: ${{ inputs.node_version || '22.15.1' }}
             
@@ -193,7 +193,7 @@ jobs:
           git verify-commit ${{ github.sha }} || echo "Warning: Commit is not signed or verification failed"
           
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: ${{ inputs.node_version || '22.15.1' }}
           cache: 'npm'
