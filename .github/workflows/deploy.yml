@@ -264,7 +264,7 @@ jobs:
           ENVIRONMENT: ${{ needs.determine-environment.outputs.environment }}
           
       - name: Create deployment record
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         if: always()
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
